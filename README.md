@@ -1,7 +1,23 @@
-# Erik's build of st - the simple (suckless) terminal
+# st - the simple (suckless) terminal
 
-The [suckless terminal (st)](https://st.suckless.org/) with some additional
-features that make it literally the best terminal emulator ever:
+A build of the [suckless terminal (st)](https://st.suckless.org/), based on
+Luke Smith's fork, updated to upstream **st 0.9.3** and extended with inline
+IME (input method) support.
+
+## Changes in this build
+
++ **Updated to st 0.9.3** (from 0.8.5) by merging upstream st into the
+  patched tree, keeping all patches and features below intact. This brings
+  in all upstream fixes and improvements from 0.9.x, including the reworked
+  window creation/embedding flow and various escape sequence and rendering
+  fixes.
++ **Inline (on-the-spot) IME preedit.** When composing text with an input
+  method (e.g. typing Korean, Japanese, or Chinese with fcitx5), the
+  composing text is rendered directly in the terminal at the cursor,
+  instead of in a floating preedit window. See
+  [Inline input method composition](#inline-input-method-composition) below
+  for the required fcitx5 setting. Falls back to the previous over-the-spot
+  behavior if the input method doesn't support it.
 
 ## Unique features (using dmenu)
 
@@ -32,14 +48,12 @@ features that make it literally the best terminal emulator ever:
 + Boxdraw
 + Ligatures
 + font2
-+ updated to latest version 0.8.4
 
-## Installation for newbs
+## Installation
 
 You should have xlib header files and libharfbuzz build files installed.
 
 ```
-git clone https://github.com/LukeSmithxyz/st
 cd st
 sudo make install
 ```
@@ -83,17 +97,25 @@ To be clear about the color settings:
 
 Note that when you run `wal`, it will negate the transparency of existing windows, but new windows will continue with the previously defined transparency.
 
-## Notes on Emojis and Special Characters
+## Inline input method composition
 
-If st crashes when viewing emojis, install
-[libxft-bgra](https://aur.archlinux.org/packages/libxft-bgra/) from the AUR.
+This build renders IME composition (preedit) text inline at the cursor,
+underlined, with the input method's highlighting respected. For this to
+work, the input method must offer the on-the-spot (`XIMPreeditCallbacks`)
+style over XIM.
 
-Note that some special characters may appear truncated if too wide. You might
-want to manually set your prefered emoji/special character font to a lower size
-in the `config.h` file to avoid this. By default, JoyPixels is used at a
-smaller size than the usual text.
+For **fcitx5**, enable it with either:
 
-## Contact
+- `fcitx5-configtool` → Addons → X Input Method Frontend → check
+  "Use On The Spot Style", or
+- add the following to `~/.config/fcitx5/conf/xim.conf`:
 
-- Luke Smith <luke@lukesmith.xyz>
-- [https://lukesmith.xyz](https://lukesmith.xyz)
+  ```
+  UseOnTheSpotStyle=True
+  ```
+
+Then restart fcitx5 (`fcitx5 -r -d`). Make sure `XMODIFIERS=@im=fcitx` is
+set in your environment so st connects to fcitx5 via XIM.
+
+Note: candidate lists (e.g. hanja/kanji conversion) are still shown in a
+popup by the input method itself; only the composing text is drawn inline.

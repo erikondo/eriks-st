@@ -7,6 +7,7 @@
 #include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
+#include <wchar.h>
 #include <libgen.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -63,7 +64,7 @@ typedef struct {
 /* X modifiers */
 #define XK_ANY_MOD    UINT_MAX
 #define XK_NO_MOD     0
-#define XK_SWITCH_MOD (1<<13)
+#define XK_SWITCH_MOD (1<<13|1<<14)
 
 /* function definitions used in config.h */
 static void clipcopy(const Arg *);
@@ -173,9 +174,9 @@ static void xresize(int, int);
 static void xhints(void);
 static int xloadcolor(int, const char *, Color *);
 static int xloadfont(Font *, FcPattern *);
-static void xloadfonts(char *, double);
 static int xloadsparefont(FcPattern *, int);
 static void xloadsparefonts(void);
+static void xloadfonts(const char *, double);
 static void xunloadfont(Font *);
 static void xunloadfonts(void);
 static void xsetenv(void);
@@ -276,6 +277,7 @@ static char *opt_title = NULL;
 static int focused = 0;
 
 static int oldbutton = 3; /* button event on startup: 3 = release */
+static uint buttons; /* bit field of pressed buttons */
 
 void
 clipcopy(const Arg *dummy)
@@ -318,13 +320,13 @@ numlock(const Arg *dummy)
 void
 changealpha(const Arg *arg)
 {
-    if((alpha > 0 && arg->f < 0) || (alpha < 1 && arg->f > 0))
-        alpha += arg->f;
-    alpha = clamp(alpha, 0.0, 1.0);
-    alphaUnfocus = clamp(alpha-alphaOffset, 0.0, 1.0);
+	if((alpha > 0 && arg->f < 0) || (alpha < 1 && arg->f > 0))
+		alpha += arg->f;
+	alpha = clamp(alpha, 0.0, 1.0);
+ 	alphaUnfocus = clamp(alpha-alphaOffset, 0.0, 1.0);
 
-    xloadcols();
-    redraw();
+	xloadcols();
+	redraw();
 }
 
 void
@@ -382,11 +384,11 @@ evrow(XEvent *e)
 
 float
 clamp(float value, float lower, float upper) {
-    if(value < lower)
-        return lower;
-    if(value > upper)
-        return upper;
-    return value;
+	if(value < lower)
+		return lower;
+	if(value > upper)
+		return upper;
+	return value;
 }
 
 void
@@ -458,7 +460,7 @@ mousereport(XEvent *e)
 	if (IS_SET(MODE_MOUSESGR)) {
 		len = snprintf(buf, sizeof(buf), "\033[<%d;%d;%d%c",
 				button, x+1, y+1,
-				e->xbutton.type == ButtonRelease ? 'm' : 'M');
+				e->type == ButtonRelease ? 'm' : 'M');
 	} else if (x < 223 && y < 223) {
 		len = snprintf(buf, sizeof(buf), "\033[M%c%c%c",
 				32+button, 32+x+1, 32+y+1);
@@ -504,8 +506,12 @@ mouseaction(XEvent *e, uint release)
 void
 bpress(XEvent *e)
 {
+	int btn = e->xbutton.button;
 	struct timespec now;
 	int snap;
+
+	if (1 <= btn && btn <= 11)
+		buttons |= 1 << (btn-1);
 
 	if (IS_SET(MODE_MOUSE) && !(e->xbutton.state & forcemousemod)) {
 		mousereport(e);
@@ -515,7 +521,7 @@ bpress(XEvent *e)
 	if (mouseaction(e, 0))
 		return;
 
-	if (e->xbutton.button == Button1) {
+	if (btn == Button1) {
 		/*
 		 * If the user clicks below predefined timeouts specific
 		 * snapping behaviour is exposed.
@@ -729,6 +735,11 @@ xsetsel(char *str)
 void
 brelease(XEvent *e)
 {
+	int btn = e->xbutton.button;
+
+	if (1 <= btn && btn <= 11)
+		buttons &= ~(1 << (btn-1));
+
 	if (IS_SET(MODE_MOUSE) && !(e->xbutton.state & forcemousemod)) {
 		mousereport(e);
 		return;
@@ -736,7 +747,7 @@ brelease(XEvent *e)
 
 	if (mouseaction(e, 1))
 		return;
-	if (e->xbutton.button == Button1)
+	if (btn == Button1)
 		mousesel(e, 1);
 }
 
@@ -855,11 +866,24 @@ xloadcols(void)
 }
 
 int
+xgetcolor(int x, unsigned char *r, unsigned char *g, unsigned char *b)
+{
+	if (!BETWEEN(x, 0, dc.collen - 1))
+		return 1;
+
+	*r = dc.col[x].color.red >> 8;
+	*g = dc.col[x].color.green >> 8;
+	*b = dc.col[x].color.blue >> 8;
+
+	return 0;
+}
+
+int
 xsetcolorname(int x, const char *name)
 {
 	Color ncolor;
 
-	if (!BETWEEN(x, 0, dc.collen))
+	if (!BETWEEN(x, 0, dc.collen - 1))
 		return 1;
 
 	if (!xloadcolor(x, name, &ncolor))
@@ -1007,7 +1031,7 @@ xloadfont(Font *f, FcPattern *pattern)
 }
 
 void
-xloadfonts(char *fontstr, double fontsize)
+xloadfonts(const char *fontstr, double fontsize)
 {
 	FcPattern *pattern;
 	double fontval;
@@ -1015,7 +1039,7 @@ xloadfonts(char *fontstr, double fontsize)
 	if (fontstr[0] == '-')
 		pattern = XftXlfdParse(fontstr, False, False);
 	else
-		pattern = FcNameParse((FcChar8 *)fontstr);
+		pattern = FcNameParse((const FcChar8 *)fontstr);
 
 	if (!pattern)
 		die("can't open font %s\n", fontstr);
@@ -1196,6 +1220,184 @@ xunloadfonts(void)
 	xunloadfont(&dc.ibfont);
 }
 
+/* on-the-spot preedit (inline IME composition, e.g. fcitx5 with
+ * UseOnTheSpotStyle=True). st renders the composing text itself at the
+ * cursor instead of the input method showing a floating preedit window. */
+#define PREEDIT_MAX 128
+static struct {
+	Rune u[PREEDIT_MAX];
+	XIMFeedback fb[PREEDIT_MAX];
+	int len;
+	int caret;
+	int active;
+} preedit;
+
+static int
+ximpreeditstart(XIC xic, XPointer client, XPointer call)
+{
+	preedit.active = 1;
+	preedit.len = 0;
+	preedit.caret = 0;
+	return -1; /* no length limit (we clamp to PREEDIT_MAX ourselves) */
+}
+
+static void
+ximpreeditdone(XIC xic, XPointer client, XPointer call)
+{
+	preedit.active = 0;
+	preedit.len = 0;
+	preedit.caret = 0;
+	redraw();
+}
+
+static void
+ximpreeditdraw(XIC xic, XPointer client, XPointer call)
+{
+	XIMPreeditDrawCallbackStruct *pd = (XIMPreeditDrawCallbackStruct *)call;
+	Rune ubuf[PREEDIT_MAX];
+	XIMFeedback fbuf[PREEDIT_MAX];
+	int i, n = 0, first, chglen, tail, newlen;
+
+	if (pd == NULL)
+		return;
+
+	first = pd->chg_first;
+	chglen = pd->chg_length;
+	LIMIT(first, 0, preedit.len);
+	LIMIT(chglen, 0, preedit.len - first);
+
+	/* decode incoming text (locale multibyte or wide chars) */
+	if (pd->text) {
+		XIMText *t = pd->text;
+		if (t->encoding_is_wchar) {
+			if (t->string.wide_char) {
+				for (i = 0; i < (int)t->length &&
+				            n < PREEDIT_MAX; i++)
+					ubuf[n++] = t->string.wide_char[i];
+			}
+		} else if (t->string.multi_byte) {
+			const char *s = t->string.multi_byte;
+			size_t slen = strlen(s), off = 0, cs;
+			wchar_t wc;
+			mbstate_t ps;
+
+			memset(&ps, 0, sizeof(ps));
+			while (off < slen && n < PREEDIT_MAX) {
+				cs = mbrtowc(&wc, s + off, slen - off, &ps);
+				if (cs == 0 || cs == (size_t)-1 ||
+				    cs == (size_t)-2)
+					break;
+				ubuf[n++] = wc;
+				off += cs;
+			}
+		}
+		for (i = 0; i < n; i++)
+			fbuf[i] = (t->feedback && i < (int)t->length) ?
+			          t->feedback[i] : 0;
+	}
+
+	/* splice: keep [0,first), insert n new chars, keep tail */
+	tail = preedit.len - (first + chglen);
+	if (first + n + tail > PREEDIT_MAX)
+		tail = MAX(PREEDIT_MAX - (first + n), 0);
+	newlen = first + n + tail;
+	memmove(&preedit.u[first + n], &preedit.u[first + chglen],
+	        tail * sizeof(preedit.u[0]));
+	memmove(&preedit.fb[first + n], &preedit.fb[first + chglen],
+	        tail * sizeof(preedit.fb[0]));
+	memcpy(&preedit.u[first], ubuf, n * sizeof(preedit.u[0]));
+	memcpy(&preedit.fb[first], fbuf, n * sizeof(preedit.fb[0]));
+	preedit.len = newlen;
+	preedit.caret = pd->caret;
+	LIMIT(preedit.caret, 0, preedit.len);
+	redraw();
+}
+
+static void
+ximpreeditcaret(XIC xic, XPointer client, XPointer call)
+{
+	XIMPreeditCaretCallbackStruct *pc =
+		(XIMPreeditCaretCallbackStruct *)call;
+
+	if (pc == NULL)
+		return;
+	switch (pc->direction) {
+	case XIMAbsolutePosition:
+		preedit.caret = pc->position;
+		LIMIT(preedit.caret, 0, preedit.len);
+		break;
+	case XIMForwardChar:
+		preedit.caret = MIN(preedit.caret + 1, preedit.len);
+		break;
+	case XIMBackwardChar:
+		preedit.caret = MAX(preedit.caret - 1, 0);
+		break;
+	default:
+		break;
+	}
+	pc->position = preedit.caret;
+	redraw();
+}
+
+void
+xdrawpreedit(int cx, int cy, int cols)
+{
+	static Glyph g[2 * PREEDIT_MAX];
+	XftGlyphFontSpec *specs = xw.specbuf;
+	Glyph base, new;
+	int i, x, ox, w, n = 0, numspecs;
+
+	if (!preedit.active || preedit.len == 0)
+		return;
+
+	for (i = 0; i < preedit.len && cx + n < cols; i++) {
+		w = wcwidth((wchar_t)preedit.u[i]);
+		if (w < 1)
+			w = 1;
+		memset(&g[n], 0, sizeof(Glyph));
+		g[n].u = preedit.u[i];
+		g[n].fg = defaultfg;
+		g[n].bg = defaultbg;
+		g[n].mode = ATTR_NULL;
+		if (preedit.fb[i] & (XIMReverse | XIMHighlight))
+			g[n].mode |= ATTR_REVERSE;
+		if (preedit.fb[i] & XIMUnderline || preedit.fb[i] == 0)
+			g[n].mode |= ATTR_UNDERLINE;
+		if (w == 2) {
+			g[n].mode |= ATTR_WIDE;
+			if (cx + n + 1 >= cols)
+				break;
+			n++;
+			memset(&g[n], 0, sizeof(Glyph));
+			g[n].mode = ATTR_WDUMMY;
+		}
+		n++;
+	}
+	if (n == 0)
+		return;
+
+	numspecs = xmakeglyphfontspecs(specs, g, n, cx, cy);
+	i = ox = 0;
+	for (x = 0; x < n && i < numspecs; x++) {
+		new = g[x];
+		if (new.mode == ATTR_WDUMMY)
+			continue;
+		if (i > 0 && ATTRCMP(base, new)) {
+			xdrawglyphfontspecs(specs, base, i, cx + ox, cy);
+			specs += i;
+			numspecs -= i;
+			i = 0;
+		}
+		if (i == 0) {
+			ox = x;
+			base = new;
+		}
+		i++;
+	}
+	if (i > 0)
+		xdrawglyphfontspecs(specs, base, i, cx + ox, cy);
+}
+
 int
 ximopen(Display *dpy)
 {
@@ -1214,11 +1416,56 @@ ximopen(Display *dpy)
 	                                      NULL);
 
 	if (xw.ime.xic == NULL) {
-		xw.ime.xic = XCreateIC(xw.ime.xim, XNInputStyle,
-		                       XIMPreeditNothing | XIMStatusNothing,
-		                       XNClientWindow, xw.win,
-		                       XNDestroyCallback, &icdestroy,
-		                       NULL);
+		XIMStyles *styles = NULL;
+		XIMStyle style = XIMPreeditNothing | XIMStatusNothing;
+		unsigned int i;
+
+		/* prefer on-the-spot (inline) preedit if the IM supports it */
+		if (XGetIMValues(xw.ime.xim, XNQueryInputStyle, &styles,
+		                 NULL) == NULL && styles) {
+			for (i = 0; i < styles->count_styles; i++) {
+				if (styles->supported_styles[i] ==
+				    (XIMPreeditCallbacks | XIMStatusNothing)) {
+					style = XIMPreeditCallbacks |
+					        XIMStatusNothing;
+					break;
+				}
+			}
+			XFree(styles);
+		}
+
+		if (style & XIMPreeditCallbacks) {
+			static XIMCallback pstart, pdone, pdraw, pcaret;
+			XVaNestedList pattr;
+
+			pstart.client_data = NULL;
+			pstart.callback = (XIMProc)ximpreeditstart;
+			pdone.client_data = NULL;
+			pdone.callback = (XIMProc)ximpreeditdone;
+			pdraw.client_data = NULL;
+			pdraw.callback = (XIMProc)ximpreeditdraw;
+			pcaret.client_data = NULL;
+			pcaret.callback = (XIMProc)ximpreeditcaret;
+			pattr = XVaCreateNestedList(0,
+			                XNPreeditStartCallback, &pstart,
+			                XNPreeditDoneCallback, &pdone,
+			                XNPreeditDrawCallback, &pdraw,
+			                XNPreeditCaretCallback, &pcaret,
+			                NULL);
+			xw.ime.xic = XCreateIC(xw.ime.xim, XNInputStyle, style,
+			                       XNPreeditAttributes, pattr,
+			                       XNClientWindow, xw.win,
+			                       XNDestroyCallback, &icdestroy,
+			                       NULL);
+			XFree(pattr);
+		}
+		if (xw.ime.xic == NULL) {
+			xw.ime.xic = XCreateIC(xw.ime.xim, XNInputStyle,
+			                       XIMPreeditNothing | XIMStatusNothing,
+			                       XNClientWindow, xw.win,
+			                       XNDestroyCallback, &icdestroy,
+			                       NULL);
+		}
 	}
 	if (xw.ime.xic == NULL)
 		fprintf(stderr, "XCreateIC: Could not create input context.\n");
@@ -1255,7 +1502,7 @@ xinit(int cols, int rows)
 {
 	XGCValues gcvalues;
 	Cursor cursor;
-	Window parent;
+	Window parent, root;
 	pid_t thispid = getpid();
 	XColor xmousefg, xmousebg;
 	XWindowAttributes attr;
@@ -1305,10 +1552,13 @@ xinit(int cols, int rows)
 		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask;
 	xw.attrs.colormap = xw.cmap;
 
-	xw.win = XCreateWindow(xw.dpy, parent, xw.l, xw.t,
+	root = XRootWindow(xw.dpy, xw.scr);
+	xw.win = XCreateWindow(xw.dpy, root, xw.l, xw.t,
 			win.w, win.h, 0, xw.depth, InputOutput,
 			xw.vis, CWBackPixel | CWBorderPixel | CWBitGravity
 			| CWEventMask | CWColormap, &xw.attrs);
+	if (parent != root)
+		XReparentWindow(xw.dpy, xw.win, parent, xw.l, xw.t);
 
 	memset(&gcvalues, 0, sizeof(gcvalues));
 	gcvalues.graphics_exposures = False;
@@ -1640,12 +1890,11 @@ xdrawglyphfontspecs(const XftGlyphFontSpec *specs, Glyph base, int len, int x, i
 
 	/* Render underline and strikethrough. */
 	if (base.mode & ATTR_UNDERLINE) {
-		XftDrawRect(xw.draw, fg, winx, winy + dc.font.ascent + 1,
-				width, 1);
+		XftDrawRect(xw.draw, fg, winx, winy + dc.font.ascent + 1, width, 1);
 	}
 
 	if (base.mode & ATTR_STRUCK) {
-		XftDrawRect(xw.draw, fg, winx, winy + 2 * dc.font.ascent / 3,
+		XftDrawRect(xw.draw, fg, winx, winy + 2 * dc.font.ascent * chscale / 3,
 				width, 1);
 	}
 
@@ -1767,8 +2016,12 @@ xseticontitle(char *p)
 	XTextProperty prop;
 	DEFAULT(p, opt_title);
 
-	Xutf8TextListToTextProperty(xw.dpy, &p, 1, XUTF8StringStyle,
-			&prop);
+	if (p[0] == '\0')
+		p = opt_title;
+
+	if (Xutf8TextListToTextProperty(xw.dpy, &p, 1, XUTF8StringStyle,
+	                                &prop) != Success)
+		return;
 	XSetWMIconName(xw.dpy, xw.win, &prop);
 	XSetTextProperty(xw.dpy, xw.win, &prop, xw.netwmiconname);
 	XFree(prop.value);
@@ -1780,8 +2033,12 @@ xsettitle(char *p)
 	XTextProperty prop;
 	DEFAULT(p, opt_title);
 
-	Xutf8TextListToTextProperty(xw.dpy, &p, 1, XUTF8StringStyle,
-			&prop);
+	if (p[0] == '\0')
+		p = opt_title;
+
+	if (Xutf8TextListToTextProperty(xw.dpy, &p, 1, XUTF8StringStyle,
+	                                &prop) != Success)
+		return;
 	XSetWMName(xw.dpy, xw.win, &prop);
 	XSetTextProperty(xw.dpy, xw.win, &prop, xw.netwmname);
 	XFree(prop.value);
@@ -1991,9 +2248,11 @@ void
 kpress(XEvent *ev)
 {
 	XKeyEvent *e = &ev->xkey;
-	KeySym ksym;
-	char buf[64], *customkey;
-	int len;
+	KeySym ksym = NoSymbol;
+	char *buf = NULL, *customkey;
+	int len = 0;
+	int buf_size = 64;
+	int critical = - 1;
 	Rune c;
 	Status status;
 	Shortcut *bp;
@@ -2001,27 +2260,44 @@ kpress(XEvent *ev)
 	if (IS_SET(MODE_KBDLOCK))
 		return;
 
-	if (xw.ime.xic)
-		len = XmbLookupString(xw.ime.xic, e, buf, sizeof buf, &ksym, &status);
-	else
-		len = XLookupString(e, buf, sizeof buf, &ksym, NULL);
+reallocbuf:
+	if (critical > 0)
+		goto cleanup;
+	if (buf)
+		free(buf);
+
+	buf = xmalloc((buf_size) * sizeof(char));
+	critical += 1;
+
+	if (xw.ime.xic) {
+		len = XmbLookupString(xw.ime.xic, e, buf, buf_size, &ksym, &status);
+		if (status == XBufferOverflow) {
+			buf_size = len;
+			goto reallocbuf;
+		}
+	} else {
+		// Not sure how to fix this and if it is fixable
+		// but at least it does write something into the buffer
+		// so it is not as critical
+		len = XLookupString(e, buf, buf_size, &ksym, NULL);
+	}
 	/* 1. shortcuts */
 	for (bp = shortcuts; bp < shortcuts + LEN(shortcuts); bp++) {
 		if (ksym == bp->keysym && match(bp->mod, e->state)) {
 			bp->func(&(bp->arg));
-			return;
+			goto cleanup;
 		}
 	}
 
 	/* 2. custom keys from config.h */
 	if ((customkey = kmap(ksym, e->state))) {
 		ttywrite(customkey, strlen(customkey), 1);
-		return;
+		goto cleanup;
 	}
 
 	/* 3. composed string from input method */
 	if (len == 0)
-		return;
+		goto cleanup;
 	if (len == 1 && e->state & Mod1Mask) {
 		if (IS_SET(MODE_8BIT)) {
 			if (*buf < 0177) {
@@ -2034,7 +2310,11 @@ kpress(XEvent *ev)
 			len = 2;
 		}
 	}
-	ttywrite(buf, len, 1);
+	if (len <= buf_size)
+		ttywrite(buf, len, 1);
+cleanup:
+	if (buf)
+		free(buf);
 }
 
 void
@@ -2181,10 +2461,8 @@ resource_load(XrmDatabase db, char *name, enum resource_type rtype, void *dst)
 	char *type;
 	XrmValue ret;
 
-	snprintf(fullname, sizeof(fullname), "%s.%s",
-			opt_name ? opt_name : "st", name);
-	snprintf(fullclass, sizeof(fullclass), "%s.%s",
-			opt_class ? opt_class : "St", name);
+	snprintf(fullname, sizeof(fullname), "%s.%s","st", name);
+	snprintf(fullclass, sizeof(fullclass), "%s.%s", "St", name);
 	fullname[sizeof(fullname) - 1] = fullclass[sizeof(fullclass) - 1] = '\0';
 
 	XrmGetResource(db, fullname, fullclass, &type, &ret);
@@ -2315,3 +2593,4 @@ run:
 
 	return 0;
 }
+
